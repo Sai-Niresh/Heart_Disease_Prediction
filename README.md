@@ -18,3 +18,8 @@ It is implemented in **Python** using **Jupyter Notebook**.
 1. Clone the repository:
    ```bash
    git clone https://github.com/Sai-Niresh/Heart_Disease_Prediction.git
+
+   ## 👤 Author
+Sai Niresh Narayan  
+[LinkedIn Profile](https://www.linkedin.com/in/sainireshnarayan2003) *(Add your actual link)*
+
