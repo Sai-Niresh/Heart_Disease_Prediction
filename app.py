@@ -1,29 +1,35 @@
 """
-app.py
-Production-ready inference and training API for Heart Disease Prediction.
+Production-ready Flask API for heart disease prediction.
 
-Usage:
-  - To train and save a model: POST /train
-  - To get prediction: POST /predict with JSON payload containing features
+Endpoints:
+- GET /health
+- POST /train
+- POST /predict
 
-Note: This script expects `heart.csv` to be present in the repository root.
+Requirements:
+- `heart.csv` must exist in the project root.
+- `heart.csv` must contain a `target` column.
 """
 
-from flask import Flask, request, jsonify
-import pandas as pd
-import numpy as np
 import os
-import joblib
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, confusion_matrix
 import logging
+from typing import List
+
+import joblib
+import numpy as np
+import pandas as pd
+from flask import Flask, jsonify, request
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.model_selection import train_test_split
 
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
+
+DATA_PATH = os.path.join("data", "heart.csv")
 MODEL_PATH = os.path.join("models", "model.joblib")
-DATA_PATH = "heart.csv"
+
 FEATURE_COLUMNS = [
     "age",
     "sex",
@@ -41,116 +47,137 @@ FEATURE_COLUMNS = [
 ]
 
 
-def ensure_models_dir():
+def ensure_model_dir() -> None:
     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
 
 
-def load_data(path=DATA_PATH):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Dataset not found at: {path}")
-    df = pd.read_csv(path)
-    return df
+def load_dataset() -> pd.DataFrame:
+    if not os.path.exists(DATA_PATH):
+        raise FileNotFoundError(f"Dataset not found at: {DATA_PATH}")
+    return pd.read_csv(DATA_PATH)
 
 
-def preprocess(df):
-    # Keep only expected features and target if present
-    missing = [c for c in FEATURE_COLUMNS if c not in df.columns]
+def prepare_features_and_target(df: pd.DataFrame):
+    missing = [col for col in FEATURE_COLUMNS if col not in df.columns]
     if missing:
-        raise ValueError(f"Missing required features in dataset: {missing}")
+        raise ValueError(f"Dataset missing required feature columns: {missing}")
+
+    if "target" not in df.columns:
+        raise ValueError("Dataset must contain a 'target' column for training.")
 
     X = df[FEATURE_COLUMNS].copy()
-    # Basic type conversions and NA handling
-    X = X.astype(float)
-    X = X.fillna(X.median())
+    y = df["target"].astype(int)
 
-    y = None
-    if "target" in df.columns:
-        y = df["target"].astype(int)
+    X = X.fillna(X.median(numeric_only=True))
     return X, y
 
 
-def train_and_save(path=MODEL_PATH):
-    logging.info("Loading data for training...")
-    df = load_data()
-    X, y = preprocess(df)
-    if y is None:
-        raise ValueError("Training requires 'target' column in the dataset.")
+def train_model() -> dict:
+    df = load_dataset()
+    X, y = prepare_features_and_target(df)
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
 
-    clf = RandomForestClassifier(n_estimators=100, random_state=42)
-    clf.fit(X_train, y_train)
+    model = RandomForestClassifier(n_estimators=200, random_state=42)
+    model.fit(X_train, y_train)
 
-    preds = clf.predict(X_test)
-    acc = accuracy_score(y_test, preds)
-    cm = confusion_matrix(y_test, preds).tolist()
+    predictions = model.predict(X_test)
+    accuracy = accuracy_score(y_test, predictions)
+    cm = confusion_matrix(y_test, predictions).tolist()
 
-    ensure_models_dir()
-    joblib.dump(clf, path)
+    ensure_model_dir()
+    joblib.dump(model, MODEL_PATH)
 
-    logging.info(f"Model trained and saved to {path} (accuracy={acc:.4f})")
-    return {"accuracy": acc, "confusion_matrix": cm}
+    logging.info("Model trained successfully at %s with accuracy %.4f", MODEL_PATH, accuracy)
+    return {
+        "status": "trained",
+        "accuracy": round(float(accuracy), 4),
+        "confusion_matrix": cm,
+        "model_path": MODEL_PATH,
+    }
 
 
-def load_model(path=MODEL_PATH):
-    if not os.path.exists(path):
-        return None
-    return joblib.load(path)
+def load_model():
+    if not os.path.exists(MODEL_PATH):
+        raise FileNotFoundError("Model not found. Please train it first by calling POST /train.")
+    return joblib.load(MODEL_PATH)
+
+
+def validate_prediction_record(record: dict) -> dict:
+    missing = [col for col in FEATURE_COLUMNS if col not in record]
+    if missing:
+        raise ValueError(f"Each record must include all required features. Missing: {missing}")
+
+    normalized = {}
+    for col in FEATURE_COLUMNS:
+        try:
+            normalized[col] = float(record[col])
+        except (TypeError, ValueError):
+            raise ValueError(f"Feature '{col}' must be numeric.")
+    return normalized
 
 
 @app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"})
+def health_check():
+    return jsonify({"status": "ok"}), 200
 
 
 @app.route("/train", methods=["POST"])
 def train():
     try:
-        result = train_and_save()
-        return jsonify({"status": "trained", "result": result}), 200
-    except Exception as e:
+        result = train_model()
+        return jsonify(result), 200
+    except Exception as exc:
         logging.exception("Training failed")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "error", "message": str(exc)}), 500
 
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        model = load_model()
-        if model is None:
-            return jsonify({"status": "error", "message": "Model not found. Train it first via POST /train."}), 400
-
-        payload = request.get_json()
+        payload = request.get_json(silent=True)
         if payload is None:
-            return jsonify({"status": "error", "message": "Invalid JSON payload."}), 400
+            return jsonify({"status": "error", "message": "Request body must be valid JSON."}), 400
 
-        # Accept single record or list of records
-        records = payload if isinstance(payload, list) else [payload]
+        if isinstance(payload, list):
+            records = payload
+        elif isinstance(payload, dict):
+            records = [payload]
+        else:
+            return jsonify({"status": "error", "message": "Payload must be a JSON object or an array of objects."}), 400
 
-        X_list = []
-        for rec in records:
-            if not all(k in rec for k in FEATURE_COLUMNS):
-                return jsonify({"status": "error", "message": f"Each record must contain the features: {FEATURE_COLUMNS}"}), 400
-            ordered = [float(rec[c]) for c in FEATURE_COLUMNS]
-            X_list.append(ordered)
+        model = load_model()
 
-        X_arr = np.array(X_list)
-        preds = model.predict(X_arr).tolist()
-        probs = None
-        if hasattr(model, "predict_proba"):
-            probs = model.predict_proba(X_arr).tolist()
+        predictions = []
+        probabilities = []
 
-        response = {"predictions": preds}
-        if probs is not None:
-            response["probabilities"] = probs
+        for record in records:
+            try:
+                normalized = validate_prediction_record(record)
+            except ValueError as exc:
+                return jsonify({"status": "error", "message": str(exc)}), 400
+
+            row = np.array([[normalized[col] for col in FEATURE_COLUMNS]], dtype=float)
+            pred = int(model.predict(row)[0])
+            predictions.append(pred)
+
+            if hasattr(model, "predict_proba"):
+                probabilities.append(model.predict_proba(row)[0].tolist())
+
+        response = {"predictions": predictions}
+        if probabilities:
+            response["probabilities"] = probabilities
 
         return jsonify(response), 200
 
-    except Exception as e:
+    except FileNotFoundError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
+    except Exception as exc:
         logging.exception("Prediction failed")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "error", "message": str(exc)}), 500
 
 
 if __name__ == "__main__":
-    # Allow running locally: python app.py
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000, debug=False)
